@@ -17,9 +17,9 @@ class CieController < ApplicationController
     def get_metadata
         begin
             #ottengo i dati del cliente, cert e chiave e varie conf passate da portale/app esterna.
-            hash_dati_cliente = authorize_request
+            hash_dati_cliente = dati_cliente_da_token
             #preparo i params per creare i settings
-            params_per_settings = prepara_params(hash_dati_cliente)
+            params_per_settings = params_per_settings(hash_dati_cliente)
             
             saml_settings = get_saml_settings(params_per_settings)
             meta = Cie::Saml::Metadata.new
@@ -45,9 +45,9 @@ class CieController < ApplicationController
         begin
             #arriva id dell'ente, chiamo servizio di auth_hub che mi restituisce i dati del cliente
             #ottengo i dati del cliente, cert e chiave e varie conf passate da portale/app esterna.
-            hash_dati_cliente = authorize_request 
+            hash_dati_cliente = dati_cliente_da_token 
             #preparo i parametri per avere i setting per fare la chiamata
-            params_per_settings = prepara_params(hash_dati_cliente)
+            params_per_settings = params_per_settings(hash_dati_cliente)
             saml_settings = get_saml_settings(params_per_settings)
             
             #create an instance of Cie::Saml::Authrequest
@@ -89,11 +89,11 @@ class CieController < ApplicationController
     def check_assertion
         begin
             #ottengo i dati del cliente, cert e chiave e varie conf passate da portale/app esterna.
-            hash_dati_cliente = authorize_request
+            hash_dati_cliente = dati_cliente_da_token
             #preparo i params per creare i settings
-            params_per_settings = prepara_params(hash_dati_cliente)
+            params_per_settings = params_per_settings(hash_dati_cliente)
             settings = get_saml_settings(params_per_settings)
-            saml_response = conf_params[:assertion]
+            saml_response = request_params[:assertion]
        
             #creo un oggetto response
             response = Cie::Saml::Response.new(saml_response)
@@ -192,13 +192,9 @@ class CieController < ApplicationController
             #     end
             # end #fine controlli su assertion
 
-                
-
             #assegno alla response i settaggi
             response.settings = settings
-            #estraggo dal Base64 l'xml
-            saml_response_dec = Base64.decode64(saml_response)
-                
+                            
             #Controllo nel caso che lo status della response non sia success il valore dell'errore.
             unless response.success?
                 status_message = response.get_status_message
@@ -232,12 +228,25 @@ class CieController < ApplicationController
             attributi_utente = response.attributes
             logger.debug "\n\n Attributi utente CIE: #{attributi_utente.inspect}"
             
-                        
             errore_autenticazione "Attributi utente non presenti" if attributi_utente.blank?
+            
+            #estraggo dal Base64 l'xml
+            saml_response_dec = Base64.decode64(saml_response)
+            saml_response_dec_compressa = Zlib::Deflate.deflate(saml_response_dec)
             
             resp = {}
             resp['esito'] = 'ok'
             resp['attributi_utente'] = attributi_utente
+            resp['response_id'] = response.response_to_id
+            resp['info_tracciatura'] = { 
+                'response' => Base64.strict_encode64(saml_response_dec_compressa),
+                'response_id' => response.id,
+                'response_issue_instant' => response.issue_instant,
+                'response_issuer' => response.issuer,
+                'assertion_id' => response.assertion_id,
+                'assertion_subject' => response.assertion_subject,
+                'assertion_subject_name_qualifier' => response.assertion_subject_name_qualifier
+            }
         rescue => exception
             logger.error exception.message
             logger.error exception.backtrace.join("\n") 
@@ -259,10 +268,6 @@ class CieController < ApplicationController
     end
     
 
-    
-
-
-
     private
     
 
@@ -280,14 +285,14 @@ class CieController < ApplicationController
     #     "app_ext"=>false,
     #     "esito"=>"ok"}
     #verifico secret
-    def authorize_request
+    def dati_cliente_da_token
         begin
             jwt_token = request.headers['Authorization']
             jwt_token = jwt_token.split(' ').last if jwt_token
             #chiamo auth_hub con questo client_id per avere il secret e decodificare il jwt_token
             #chiave segreta recuperata con Rails.application.credentials.external_auth_api_key
             payload = {
-                'client_id' => conf_params['client_id'],
+                'client_id' => request_params['client_id'],
                 'tipo_login' => 'cie',
                 'start' => DateTime.now.new_offset(0).strftime("%d%m%Y%H%M%S")  #datetime in formato utc all'invio
             }    
@@ -402,7 +407,7 @@ class CieController < ApplicationController
         settings
     end
 
-    def prepara_params(hash_dati_cliente)
+    def params_per_settings(hash_dati_cliente)
         #arrivano certificato e chiave in base64, uso dei tempfile (vengono puliti dal garbage_collector)
         cert_temp_file = Tempfile.new("temp_cert_#{hash_dati_cliente['client']}")
         cert_temp_file.write(Zlib::Inflate.inflate(Base64.strict_decode64(hash_dati_cliente['cert_b64'])))
@@ -429,7 +434,7 @@ class CieController < ApplicationController
         params_per_settings
     end
 
-    def conf_params
+    def request_params
         params.permit(:client_id, :assertion)
     end
 
